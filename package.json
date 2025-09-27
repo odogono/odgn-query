@@ -1,0 +1,51 @@
+{
+  "name": "odgn-query",
+  "version": "0.0.1",
+  "license": "MIT",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "scripts": {
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint --cache .",
+    "lint:fix": "eslint --fix .",
+    "outdated": "bunx npm-check-updates --interactive --format group",
+    "test": "bun test",
+    "test:coverage": "bun test --coverage",
+    "unused": "knip",
+    "clean": "rm -rf dist",
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "bun run clean && bun run build && bun run test && bun run lint:fix && bun run format:check"
+  },
+  "devDependencies": {
+    "@ianvs/prettier-plugin-sort-imports": "^4.7.0",
+    "@nkzw/eslint-config": "^3.0.3",
+    "@types/bun": "latest",
+    "eslint": "^9",
+    "knip": "^5.64.1",
+    "prettier": "^3",
+    "typescript": "^5"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "lru-cache": "^11.2.2",
+    "mitt": "^3.0.1",
+    "superjson": "^2.2.2"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "sideEffects": false
+}
