@@ -1,5 +1,4 @@
 // cache_redis.ts
-import { RedisClient } from 'bun';
 import SuperJSON from 'superjson';
 
 import { normalizeKey, type AsyncOrSync, type QueryKey } from '.';
@@ -13,14 +12,26 @@ export type RedisCacheOptions = {
 };
 
 // Note: Uses Bun.Redis dynamically via consumer choice (QueryClient loads lazily)
+type RedisLike = {
+  close?: () => Promise<void> | void;
+  del: (...keys: string[]) => Promise<unknown> | unknown;
+  disconnect?: () => Promise<void> | void;
+  get: (key: string) => Promise<string | null> | string | null;
+  quit?: () => Promise<void> | void;
+  sadd: (key: string, member: string) => Promise<unknown> | unknown;
+  set: (key: string, value: string) => Promise<unknown> | unknown;
+  smembers: (key: string) => Promise<string[] | null> | string[] | null;
+  srem: (key: string, member: string) => Promise<unknown> | unknown;
+};
+
 export class RedisQueryCache {
-  private redis: RedisClient;
+  private redis: RedisLike;
   private readonly prefix: string;
   private readonly defaultTtl: number;
   private readonly refreshing = new Map<string, Promise<unknown>>();
 
   private constructor(
-    redis: RedisClient,
+    redis: RedisLike,
     opts: Required<Omit<RedisCacheOptions, 'url'>>
   ) {
     this.redis = redis;
@@ -34,7 +45,19 @@ export class RedisQueryCache {
       prefix = 'odgnq',
       url = 'redis://127.0.0.1:6379'
     } = opts;
-    const redis = new RedisClient(url);
+
+    // Resolve Redis constructor from Bun at runtime to avoid hard dependency
+    const RedisConstructor = (
+      globalThis as unknown as {
+        Bun?: { Redis?: new (...args: unknown[]) => unknown };
+      }
+    ).Bun?.Redis;
+    if (!RedisConstructor) {
+      throw new Error('Redis adapter requires Bun.Redis at runtime');
+    }
+    const redis = new (RedisConstructor as new (url: string) => unknown)(
+      url
+    ) as RedisLike;
     return new RedisQueryCache(redis, { defaultTtl, prefix });
   }
 
@@ -141,6 +164,49 @@ export class RedisQueryCache {
       await this.redis.del(...keys);
       await this.redis.del(idx);
     }
+  }
+
+  async set<T>(
+    key: QueryKey,
+    value: T,
+    ttl: number = this.defaultTtl
+  ): Promise<void> {
+    const norm = normalizeKey(key);
+    const entry = { expiry: Date.now() + ttl, value };
+    await this.redis.set(this.k(norm), SuperJSON.stringify(entry));
+    await this.redis.sadd(`${this.prefix}:index`, norm);
+  }
+
+  async close(): Promise<void> {
+    const client = this.redis;
+    if (typeof client.quit === 'function') {
+      await client.quit();
+    } else if (typeof client.close === 'function') {
+      await client.close();
+    } else if (typeof client.disconnect === 'function') {
+      await client.disconnect();
+    }
+  }
+
+  async gc(): Promise<number> {
+    const idx = `${this.prefix}:index`;
+    const now = Date.now();
+    let removed = 0;
+    const members: string[] = (await this.redis.smembers(idx)) || [];
+    for (const norm of members) {
+      const raw = await this.redis.get(this.k(norm));
+      if (!raw) {
+        await this.redis.srem(idx, norm);
+        continue;
+      }
+      const entry = SuperJSON.parse(raw) as { expiry: number };
+      if (entry.expiry <= now) {
+        await this.redis.del(this.k(norm));
+        await this.redis.srem(idx, norm);
+        removed++;
+      }
+    }
+    return removed;
   }
 }
 

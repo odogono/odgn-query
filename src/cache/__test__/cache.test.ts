@@ -125,4 +125,27 @@ describe('QueryCache', () => {
     expect(result3).toBe('value2');
     expect(callCount).toBe(2);
   });
+
+  test('coalesces concurrent misses', async () => {
+    const key = ['concurrent'];
+    const cache = new QueryCache({ defaultTtl: 1000, maxSize: 10 });
+    let calls = 0;
+    let resolveFn!: (v: string) => void;
+    const p = new Promise<string>(res => {
+      resolveFn = res;
+    });
+    const fn = () => {
+      calls++;
+      return p;
+    };
+
+    const pr1 = cache.wrap(key, fn);
+    const pr2 = cache.wrap(key, fn);
+    // resolve underlying once for both callers
+    resolveFn('done');
+    const [r1, r2] = await Promise.all([pr1, pr2]);
+    expect(r1).toBe('done');
+    expect(r2).toBe('done');
+    expect(calls).toBe(1);
+  });
 });
