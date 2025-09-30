@@ -25,11 +25,34 @@ export type CacheEntry<T> = {
 
 export const normalizeKey = (key: QueryKey): string => JSON.stringify(key);
 
+// Public cache adapter contract used by QueryClient and adapters
+export type CacheAdapter = {
+  wrap: <T>(
+    key: QueryKey,
+    fn: () => AsyncOrSync<T>,
+    ttl?: number,
+    backgroundRefresh?: boolean
+  ) => Promise<T>;
+  invalidate: (key: QueryKey) => Promise<void> | void;
+  invalidateQueries: (prefix: QueryKey) => Promise<void> | void;
+  getEntry: (
+    key: QueryKey
+  ) =>
+    | Promise<{ expiry: number; value: unknown } | undefined>
+    | { expiry: number; value: unknown }
+    | undefined;
+  clear: () => Promise<void> | void;
+  set?: <T>(key: QueryKey, value: T, ttl?: number) => Promise<void> | void;
+  close?: () => Promise<void> | void;
+  gc?: () => Promise<number> | number; // returns number of removed entries
+};
+
 /**
  * QueryCache is a simple cache that can be used to cache the results of a query.
  */
 export class QueryCache {
   private cache: LRUCache<string, CacheEntry<unknown>>;
+  private inflight = new Map<string, Promise<unknown>>();
 
   constructor({
     defaultTtl = ONE_MINUTE_IN_MS,
@@ -84,13 +107,25 @@ export class QueryCache {
       }
     }
 
-    // no entry → compute + store
-    const value = await fn();
-    this.cache.set(norm, {
-      expiry: now + ttl,
-      value
-    });
-    return value as T;
+    // no entry → coalesce concurrent misses
+    const existing = this.inflight.get(norm) as Promise<T> | undefined;
+    if (existing) {
+      return existing;
+    }
+    const p = (async () => {
+      try {
+        const value = await fn();
+        this.cache.set(norm, {
+          expiry: now + ttl,
+          value
+        });
+        return value as T;
+      } finally {
+        this.inflight.delete(norm);
+      }
+    })();
+    this.inflight.set(norm, p as Promise<unknown>);
+    return p;
   }
 
   invalidate(key: QueryKey): void {
@@ -124,11 +159,33 @@ export class QueryCache {
 
   // in cache.ts (the SWR-enabled QueryCache version)
   getEntry(key: QueryKey) {
-    return this.cache.get(normalizeKey(key));
+    const e = this.cache.get(normalizeKey(key));
+    return e ? { expiry: e.expiry, value: e.value } : undefined;
   }
 
   clear(): void {
     this.cache.clear();
+  }
+
+  set<T>(key: QueryKey, value: T, ttl: number = this.defaultTtl): void {
+    const norm = normalizeKey(key);
+    const now = Date.now();
+    this.cache.set(norm, { expiry: now + ttl, value });
+  }
+
+  close(): void {}
+
+  gc(): number {
+    const now = Date.now();
+    let removed = 0;
+    for (const k of this.cache.keys()) {
+      const entry = this.cache.get(k);
+      if (entry && entry.expiry <= now) {
+        this.cache.delete(k);
+        removed++;
+      }
+    }
+    return removed;
   }
 }
 

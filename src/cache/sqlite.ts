@@ -159,6 +159,40 @@ export class SqliteQueryCache {
   async clear(): Promise<void> {
     this.db.query('DELETE FROM odgnq_cache WHERE namespace=?1').run(this.ns);
   }
+
+  async set<T>(
+    key: QueryKey,
+    value: T,
+    ttl: number = this.defaultTtl
+  ): Promise<void> {
+    const norm = normalizeKey(key);
+    const entry = SuperJSON.stringify(value);
+    const expiry = Date.now() + ttl;
+    this.db
+      .query(
+        `INSERT INTO odgnq_cache(namespace,key,expiry,value) VALUES(?1,?2,?3,?4)
+         ON CONFLICT(namespace,key) DO UPDATE SET expiry=excluded.expiry, value=excluded.value`
+      )
+      .run(this.ns, norm, expiry, entry);
+  }
+
+  async close(): Promise<void> {
+    this.db.close();
+  }
+
+  async gc(): Promise<number> {
+    const now = Date.now();
+    const row = this.db
+      .query(
+        'SELECT COUNT(*) as cnt FROM odgnq_cache WHERE namespace=?1 AND expiry<=?2'
+      )
+      .get(this.ns, now) as { cnt: number } | undefined;
+    const count = row ? Number(row.cnt) : 0;
+    this.db
+      .query('DELETE FROM odgnq_cache WHERE namespace=?1 AND expiry<=?2')
+      .run(this.ns, now);
+    return count;
+  }
 }
 
 export const createSqliteQueryCache = (opts: SqliteCacheOptions = {}) =>

@@ -2,6 +2,8 @@
 
 A minimal, barely passable, implemention of a caching framework not unlike [Tanstack Query](https://github.com/TanStack/query)
 
+Runtime support: Works in browsers, Node, and Deno by default via the in-memory LRU adapter. Redis and SQLite adapters are optional and loaded lazily; they require Bun at runtime. You can also plug in your own adapter to use any store (e.g., Node Redis client, Deno KV).
+
 ## Usage
 
 ### Basic Query
@@ -47,12 +49,65 @@ const updateUser = queryClient.mutation({
     });
     return response.json();
   },
-  invalidate: (result, [userId]) => [['user', userId], ['users']]
+  onSuccess: (data, variables) => {
+    console.log('User updated:', data);
+    // Manually invalidate related queries
+    queryClient.invalidate(['user', userId]);
+    queryClient.invalidate(['users']);
+  },
+  onError: (error, variables) => {
+    console.error('Update failed:', error);
+  }
 });
 
-// Use the mutation
-const updatedUser = await updateUser(1, { name: 'Jane' });
+// Use the mutation - returns an object with state and methods
+const { mutate, mutateAsync, isSuccess, isError } = updateUser;
+
+// Execute the mutation
+const updatedUser = await mutate(1, { name: 'Jane' });
+// or
+const updatedUser2 = await mutateAsync(1, { name: 'John' });
+
+// Check mutation state
+if (isSuccess) {
+  console.log('Mutation completed successfully');
+}
+if (isError) {
+  console.log('Mutation failed');
+}
 ```
+
+#### Mutation Options
+
+- `mutationFn`: The function that performs the mutation
+- `onMutate`: Called before the mutation function executes
+- `onSuccess`: Called when the mutation succeeds (use this to manually invalidate queries)
+- `onError`: Called when the mutation fails
+- `onSettled`: Called when the mutation completes (regardless of success/error)
+
+#### Manual Invalidation
+
+Unlike TanStack Query, this library requires manual invalidation. Use `onSuccess` to invalidate queries:
+
+```typescript
+onSuccess: (data, variables) => {
+  // Invalidate specific queries
+  queryClient.invalidate(['user', data.id]);
+  queryClient.invalidate(['users']);
+
+  // Or invalidate by prefix
+  queryClient.invalidateQueries(['user']);
+};
+```
+
+#### Mutation Return Object
+
+The `mutation()` method returns an object with:
+
+- `mutate`: Execute the mutation (returns Promise<TResult>)
+- `mutateAsync`: Alias for `mutate`
+- `isSuccess`: Boolean indicating if last mutation succeeded
+- `isError`: Boolean indicating if last mutation failed
 
 ### Event Listening
 
@@ -76,6 +131,40 @@ queryClient.clear();
 
 // Clear the entire cache and await completion
 await queryClient.clearAll();
+```
+
+### Direct Data Access
+
+```ts
+// Read cached data (may be stale)
+const users = await queryClient.getQueryData<User[]>(['users']);
+
+// Seed/optimistically update cached data
+await queryClient.setQueryData(['users', 1], { id: 1, name: 'Alice' }, 60000);
+```
+
+### Stats and GC
+
+```ts
+// Reset counters
+queryClient.resetStats();
+
+// Run some queries
+await queryClient.query({
+  queryFn: () => fetch('/api').then(r => r.json()),
+  queryKey: ['api']
+});
+await queryClient.query({
+  queryFn: () => fetch('/api').then(r => r.json()),
+  queryKey: ['api']
+});
+
+// Inspect counters: { hits, misses, stale, fetches, errors }
+console.log(queryClient.stats());
+
+// Garbage-collect expired entries (removes only expired ones)
+const removed = await queryClient.gc();
+console.log(`GC removed ${removed} entries`);
 ```
 
 ### LRU Storage (Default)
@@ -115,7 +204,12 @@ const { data, error } = await client.query({
 if (error) throw error;
 ```
 
-Note: Redis support requires running under Bun (uses `Bun.Redis`). In browsers or non-Redis environments, keep the default LRU cache.
+Note: This built-in Redis adapter requires Bun at runtime (uses `Bun.Redis`). In Node/Deno, either stick with the LRU adapter or provide a custom adapter (see below) backed by your preferred Redis client.
+
+```ts
+// When finished, close the client/adapter
+await client.close();
+```
 
 ### SQLite Storage (File DB)
 
@@ -140,18 +234,47 @@ const { data, error } = await client.query({
 if (error) throw error;
 ```
 
-Note: SQLite support requires running under Bun (uses `bun:sqlite`).
+Note: This built-in SQLite adapter requires Bun at runtime (uses `bun:sqlite`).
+
+```ts
+// When finished, close the client/adapter
+await client.close();
+```
+
 To install dependencies:
 
-```bash
+````bash
 bun install
-```
+
+### Custom Adapters (Node/Deno friendly)
+
+You can supply your own cache adapter that implements the `CacheAdapter` contract, avoiding any Bun-specific APIs:
+
+```ts
+import { QueryClient, type CacheAdapter, type QueryKey } from 'odgn-query';
+
+const myAdapter: CacheAdapter = {
+  async wrap<T>(key: QueryKey, fn: () => Promise<T>, ttl = 60000) {
+    // your storage logic here
+    return fn();
+  },
+  invalidate: async key => {},
+  invalidateQueries: async prefix => {},
+  getEntry: async key => undefined,
+  clear: async () => {},
+  set: async (key, value, ttl) => {}
+};
+
+const client = new QueryClient({ adapter: myAdapter });
+````
+
+````
 
 To run:
 
 ```bash
 bun run index.ts
-```
+````
 
 This project was created using `bun init` in bun v1.2.22. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.
 
