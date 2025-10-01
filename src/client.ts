@@ -1,7 +1,12 @@
 // queryClient.ts
 import mitt from 'mitt';
 
-import { QueryCache, type CacheAdapter, type QueryKey } from './cache';
+import {
+  QueryCache,
+  normalizeKey,
+  type CacheAdapter,
+  type QueryKey
+} from './cache';
 import { createLog } from './helpers/log';
 import { ONE_MINUTE_IN_MS } from './helpers/time';
 
@@ -75,6 +80,8 @@ export class QueryClient {
   private emitter = mitt<EventMap>();
   private initPromise?: Promise<void>;
   private pending?: Promise<void>;
+  // Registry to retain query functions per key across adapters
+  private queryFnRegistry = new Map<string, () => AsyncOrSync<unknown>>();
   private defaults = {
     backgroundRefresh: true,
     ttl: ONE_MINUTE_IN_MS
@@ -210,6 +217,12 @@ export class QueryClient {
 
     await this.ensureReady();
 
+    // Remember the query function for refetch across adapters
+    this.queryFnRegistry.set(
+      normalizeKey(queryKey),
+      queryFn as () => AsyncOrSync<unknown>
+    );
+
     const entry = await this.cache.getEntry(queryKey);
     if (!entry) {
       this.emitEvent('MISS', queryKey);
@@ -339,6 +352,99 @@ export class QueryClient {
     });
   }
 
+  async refetchQueries(
+    queryKey: QueryKey | QueryKey[] | ((key: QueryKey) => boolean),
+    options?: RefetchOptions
+  ): Promise<RefetchResult[]> {
+    await this.ensureReady();
+
+    // Resolve matching keys via adapter or fallback for explicit list
+    let matchingKeys: QueryKey[] = [];
+    if (this.cache.findMatchingKeys) {
+      matchingKeys = await Promise.resolve(
+        this.cache.findMatchingKeys(queryKey)
+      );
+    } else if (
+      Array.isArray(queryKey) &&
+      queryKey.length > 0 &&
+      Array.isArray((queryKey as unknown[])[0])
+    ) {
+      // Fallback: explicit list of keys
+      matchingKeys = queryKey as QueryKey[];
+    } else {
+      throw new Error(
+        'refetchQueries requires adapter.findMatchingKeys for this matcher on the current adapter'
+      );
+    }
+
+    const ttl = this.defaults.ttl;
+
+    const doRefetch = async (key: QueryKey): Promise<RefetchResult> => {
+      try {
+        const norm = normalizeKey(key);
+        const entry = await this.cache.getEntry(key);
+        const fn =
+          (entry?.queryFn as (() => AsyncOrSync<unknown>) | undefined) ??
+          this.queryFnRegistry.get(norm);
+        if (!fn) {
+          return {
+            error: new Error(
+              `No query function found for key ${JSON.stringify(key)}`
+            ),
+            key
+          };
+        }
+        this.emitEvent('REFETCH', key);
+        const data = await fn();
+        // Force update cache and TTL regardless of freshness
+        if (this.cache.set) {
+          await this.cache.set(key, data, ttl);
+        }
+        return { data, key };
+      } catch (error) {
+        this.emitEvent('ERROR', key, error);
+        return { error: error as Error, key };
+      }
+    };
+
+    if (options?.throwOnError) {
+      const results: RefetchResult[] = [];
+      for (const key of matchingKeys) {
+        const r = await doRefetch(key);
+        if (r.error) {
+          throw r.error;
+        }
+        results.push(r);
+      }
+      return results;
+    }
+
+    const limit = Math.max(
+      1,
+      Math.min(
+        matchingKeys.length,
+        options?.concurrency
+          ? Math.floor(options.concurrency)
+          : matchingKeys.length
+      )
+    );
+    const results: RefetchResult[] = [];
+    let index = 0;
+    const workers = Array.from({ length: limit }, async () => {
+      while (true) {
+        const i = index++;
+        if (i >= matchingKeys.length) {
+          break;
+        }
+        const key = matchingKeys[i]!;
+        const r = await doRefetch(key);
+        results.push(r);
+      }
+    });
+    await Promise.all(workers);
+    return results;
+  }
+
   clear() {
     this.emitEvent('CLEAR_ALL');
     this.enqueue(async () => {
@@ -405,7 +511,9 @@ export type EventType =
   | 'MUTATION_ERROR'
   | 'INVALIDATE'
   | 'INVALIDATE_BRANCH'
-  | 'CLEAR_ALL';
+  | 'CLEAR_ALL'
+  | 'REFETCH'
+  | 'event';
 
 export type BaseEvent = {
   key?: QueryKey;
@@ -415,3 +523,7 @@ export type BaseEvent = {
 };
 
 export type EventMap = Record<EventType | 'event', BaseEvent>;
+
+// ----- Public helper types -----
+export type RefetchOptions = { concurrency?: number; throwOnError?: boolean };
+export type RefetchResult = { data?: unknown; error?: Error; key: QueryKey };

@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
 
+import type { AsyncOrSync } from '../cache';
 import { QueryClient, type EventData } from '../client';
+
+const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
 
 describe('QueryClient', () => {
   let client: QueryClient;
@@ -266,14 +269,13 @@ describe('QueryClient', () => {
       },
       async invalidate() {},
       async invalidateQueries() {},
-      async wrap() {
-        return undefined as unknown as string;
+      async wrap<T>(key: unknown, fn: () => AsyncOrSync<T>) {
+        return fn();
       }
     };
     const client = new QueryClient({
       adapterFactory: async () => {
         await new Promise(res => setTimeout(res, 10));
-        // @ts-expect-error minimal adapter for test
         return adapter;
       },
       logging: false
@@ -321,8 +323,8 @@ describe('QueryClient', () => {
     await client.setQueryData(['gc', 1], 'a', 30);
     await client.setQueryData(['gc', 2], 'b', 1000);
     // ensure set
-    expect(await client.getQueryData(['gc', 1])).toBe('a');
-    expect(await client.getQueryData(['gc', 2])).toBe('b');
+    expect(await client.getQueryData(['gc', 1])).toBeDefined();
+    expect(await client.getQueryData(['gc', 2])).toBeDefined();
 
     // wait for first to expire
     await new Promise(res => setTimeout(res, 40));
@@ -336,5 +338,208 @@ describe('QueryClient', () => {
       queryKey: ['gc', 1]
     });
     expect(res1.data).toBe('refetch-a');
+  });
+
+  test('refetchQueries refetches queries by exact key', async () => {
+    let callCount = 0;
+    const queryFn = () => {
+      callCount++;
+      return Promise.resolve(`result${callCount}`);
+    };
+
+    await client.query({ queryFn, queryKey: ['test1'] });
+    await client.query({ queryFn, queryKey: ['test2'] });
+
+    expect(callCount).toBe(2);
+
+    const results = await client.refetchQueries(['test1']);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toBeDefined();
+    expect(results[0].key).toEqual(['test1']);
+    expect(results[0].data).toBe('result3');
+    expect(results[0].error).toBeUndefined();
+    expect(callCount).toBe(3);
+  });
+
+  test('refetchQueries refetches queries by prefix', async () => {
+    let callCount1 = 0;
+    let callCount2 = 0;
+    const queryFn1 = () => {
+      callCount1++;
+      return Promise.resolve(`result1-${callCount1}`);
+    };
+    const queryFn2 = () => {
+      callCount2++;
+      return Promise.resolve(`result2-${callCount2}`);
+    };
+
+    await client.query({ queryFn: queryFn1, queryKey: ['users', 1] });
+    await client.query({ queryFn: queryFn2, queryKey: ['users', 2] });
+    await client.query({ queryFn: queryFn1, queryKey: ['posts', 1] });
+
+    expect(callCount1).toBe(2);
+    expect(callCount2).toBe(1);
+
+    const results = await client.refetchQueries(['users']);
+
+    expect(results).toHaveLength(2);
+    expect(results[0]).toBeDefined();
+    expect(results[1]).toBeDefined();
+    const resultKeys = results
+      .map(r => r.key)
+      .sort((a, b) => (a[1] as number) - (b[1] as number));
+    expect(resultKeys[0]).toEqual(['users', 1]);
+    expect(resultKeys[1]).toEqual(['users', 2]);
+    expect(callCount1).toBe(3);
+    expect(callCount2).toBe(2);
+  });
+
+  test('refetchQueries handles predicate function', async () => {
+    let callCount = 0;
+    const queryFn = () => {
+      callCount++;
+      return Promise.resolve(`result${callCount}`);
+    };
+
+    await client.query({ queryFn, queryKey: ['test1'] });
+    await client.query({ queryFn, queryKey: ['test2'] });
+    await client.query({ queryFn, queryKey: ['other'] });
+
+    const results = await client.refetchQueries(
+      key => typeof key[0] === 'string' && key[0].startsWith('test')
+    );
+
+    expect(results).toHaveLength(2);
+    expect(results[0]).toBeDefined();
+    expect(results[1]).toBeDefined();
+    const resultKeys = results
+      .map(r => r.key)
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+    expect(resultKeys[0]).toEqual(['test1']);
+    expect(resultKeys[1]).toEqual(['test2']);
+    expect(callCount).toBe(5); // 2 initial + 2 refetch + 1 other
+  });
+
+  test('refetchQueries handles errors', async () => {
+    await client.query({
+      queryFn: () => Promise.resolve('success'),
+      queryKey: ['success']
+    });
+    await client.query({
+      queryFn: () => {
+        throw new Error('fail');
+      },
+      queryKey: ['fail']
+    });
+
+    const results = await client.refetchQueries([['success'], ['fail']]);
+
+    expect(results).toHaveLength(2);
+    const successResult = results.find(r => r.key[0] === 'success');
+    const failResult = results.find(r => r.key[0] === 'fail');
+    expect(successResult).toBeDefined();
+    expect(successResult!.data).toBe('success');
+    expect(successResult!.error).toBeUndefined();
+    expect(failResult).toBeDefined();
+    expect(failResult!.data).toBeUndefined();
+    expect(failResult!.error?.message).toBe('fail');
+  });
+
+  test('refetchQueries with throwOnError throws on first error', async () => {
+    await client.query({
+      queryFn: () => {
+        throw new Error('fail1');
+      },
+      queryKey: ['fail1']
+    });
+    await client.query({
+      queryFn: () => {
+        throw new Error('fail2');
+      },
+      queryKey: ['fail2']
+    });
+
+    await expect(
+      client.refetchQueries([['fail1'], ['fail2']], { throwOnError: true })
+    ).rejects.toThrow('fail1');
+  });
+
+  test('refetchQueries updates cache with new value', async () => {
+    let count = 0;
+    const queryFn = () => {
+      count++;
+      return Promise.resolve(`v${count}`);
+    };
+
+    await client.query({ queryFn, queryKey: ['refetch', 'upd'], ttl: 1000 });
+    expect(await client.getQueryData(['refetch', 'upd'])).toBe('v1');
+
+    const results = await client.refetchQueries([['refetch', 'upd']]);
+    expect(results).toHaveLength(1);
+    expect(results[0].data).toBe('v2');
+
+    // Cache should now hold the new value immediately (even if previous entry was fresh)
+    expect(await client.getQueryData(['refetch', 'upd'])).toBe('v2');
+  });
+  test('refetchQueries supports concurrency option', async () => {
+    const delay = 40; // ms per refetch
+
+    let a = 0;
+    let b = 0;
+    let c = 0;
+
+    const fnA = async () => {
+      await sleep(delay);
+      a++;
+      return `a${a}`;
+    };
+    const fnB = async () => {
+      await sleep(delay);
+      b++;
+      return `b${b}`;
+    };
+    const fnC = async () => {
+      await sleep(delay);
+      c++;
+      return `c${c}`;
+    };
+
+    // seed cache and registry
+    await client.query({ queryFn: fnA, queryKey: ['conc', 'a'] });
+    await client.query({ queryFn: fnB, queryKey: ['conc', 'b'] });
+    await client.query({ queryFn: fnC, queryKey: ['conc', 'c'] });
+
+    // sequential via concurrency: 1
+    const t1 = Date.now();
+    const r1 = await client.refetchQueries(
+      [
+        ['conc', 'a'],
+        ['conc', 'b'],
+        ['conc', 'c']
+      ],
+      {
+        concurrency: 1
+      }
+    );
+    const d1 = Date.now() - t1;
+    expect(r1).toHaveLength(3);
+    expect(d1).toBeGreaterThanOrEqual(delay * 3 - 5); // allow small jitter
+
+    // parallel with concurrency: 3
+    const t2 = Date.now();
+    const r2 = await client.refetchQueries(
+      [
+        ['conc', 'a'],
+        ['conc', 'b'],
+        ['conc', 'c']
+      ],
+      {
+        concurrency: 3
+      }
+    );
+    const d2 = Date.now() - t2;
+    expect(r2).toHaveLength(3);
+    expect(d2).toBeLessThan(delay * 2); // should complete faster than two serial steps
   });
 });

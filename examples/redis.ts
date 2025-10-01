@@ -2,7 +2,7 @@
 /* eslint-disable no-console */
 // Run with: bun run examples/redis.ts
 // Requires a local Redis server at redis://127.0.0.1:6379
-import { QueryClient } from '../src/client';
+import { QueryClient, type RefetchResult } from '@/client';
 
 const client = new QueryClient({
   cache: 'redis',
@@ -56,6 +56,23 @@ const main = async () => {
     throw r2.error;
   }
   console.log('Cached ok');
+
+  // Demonstrate refetchQueries on a branch
+  await client.query({
+    queryFn: () => Promise.resolve('u1'),
+    queryKey: ['users', 1]
+  });
+  await client.query({
+    queryFn: () => Promise.resolve('u2'),
+    queryKey: ['users', 2]
+  });
+  const refetched: RefetchResult[] = await client.refetchQueries(['users'], {
+    concurrency: 2
+  });
+  console.log(
+    'Refetched (redis):',
+    refetched.map(r => ({ key: r.key, ok: !r.error }))
+  );
 };
 
 await main();

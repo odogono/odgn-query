@@ -19,6 +19,7 @@ export type CacheOptions = {
 
 export type CacheEntry<T> = {
   expiry: number; // timestamp when entry becomes stale
+  queryFn?: () => AsyncOrSync<T>; // store query function for refetch
   refreshing?: Promise<T>; // track ongoing background refresh
   value: T;
 };
@@ -29,12 +30,20 @@ export const normalizeKey = (key: QueryKey): string => JSON.stringify(key);
 export type CacheAdapter = {
   clear: () => Promise<void> | void;
   close?: () => Promise<void> | void;
+  findMatchingKeys?: (
+    matcher: QueryKey | QueryKey[] | ((key: QueryKey) => boolean)
+  ) => Promise<QueryKey[]> | QueryKey[];
   gc?: () => Promise<number> | number; // returns number of removed entries
-  getEntry: (
-    key: QueryKey
-  ) =>
-    | Promise<{ expiry: number; value: unknown } | undefined>
-    | { expiry: number; value: unknown }
+  getEntry: (key: QueryKey) =>
+    | Promise<
+        | {
+            expiry: number;
+            queryFn?: () => AsyncOrSync<unknown>;
+            value: unknown;
+          }
+        | undefined
+      >
+    | { expiry: number; queryFn?: () => AsyncOrSync<unknown>; value: unknown }
     | undefined;
   invalidate: (key: QueryKey) => Promise<void> | void;
   invalidateQueries: (prefix: QueryKey) => Promise<void> | void;
@@ -88,6 +97,7 @@ export class QueryCache {
             const newVal = await fn();
             this.cache.set(norm, {
               expiry: Date.now() + ttl,
+              queryFn: fn,
               value: newVal
             });
             return newVal;
@@ -101,6 +111,7 @@ export class QueryCache {
         const value = await fn();
         this.cache.set(norm, {
           expiry: now + ttl,
+          queryFn: fn,
           value
         });
         return value;
@@ -117,9 +128,18 @@ export class QueryCache {
         const value = await fn();
         this.cache.set(norm, {
           expiry: now + ttl,
+          queryFn: fn,
           value
         });
         return value as T;
+      } catch (error) {
+        // Store the queryFn even on failure so it can be refetched
+        this.cache.set(norm, {
+          expiry: now + ttl,
+          queryFn: fn,
+          value: error as T // Store the error as the value
+        });
+        throw error;
       } finally {
         this.inflight.delete(norm);
       }
@@ -157,10 +177,63 @@ export class QueryCache {
     return true;
   }
 
+  private isKeyExactMatch(key: QueryKey, target: QueryKey): boolean {
+    if (key.length !== target.length) {
+      return false;
+    }
+    for (let i = 0; i < key.length; i++) {
+      if (key[i] !== target[i]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  findMatchingKeys(
+    matcher: QueryKey | QueryKey[] | ((key: QueryKey) => boolean)
+  ): QueryKey[] {
+    if (typeof matcher === 'function') {
+      const keys: QueryKey[] = [];
+      for (const k of this.cache.keys()) {
+        const key = JSON.parse(k) as QueryKey;
+        if (matcher(key)) {
+          keys.push(key);
+        }
+      }
+      return keys;
+    } else if (
+      Array.isArray(matcher) &&
+      matcher.length > 0 &&
+      Array.isArray(matcher[0])
+    ) {
+      // matcher is QueryKey[]
+      const result: QueryKey[] = [];
+      for (const targetKey of matcher as QueryKey[]) {
+        const norm = normalizeKey(targetKey);
+        if (this.cache.has(norm)) {
+          result.push(targetKey);
+        }
+      }
+      return result;
+    } else {
+      // matcher is QueryKey (prefix)
+      const keys: QueryKey[] = [];
+      for (const k of this.cache.keys()) {
+        const key = JSON.parse(k) as QueryKey;
+        if (this.isKeyPrefixMatch(key, matcher as QueryKey)) {
+          keys.push(key);
+        }
+      }
+      return keys;
+    }
+  }
+
   // in cache.ts (the SWR-enabled QueryCache version)
   getEntry(key: QueryKey) {
     const e = this.cache.get(normalizeKey(key));
-    return e ? { expiry: e.expiry, value: e.value } : undefined;
+    return e
+      ? { expiry: e.expiry, queryFn: e.queryFn, value: e.value }
+      : undefined;
   }
 
   clear(): void {
@@ -170,7 +243,13 @@ export class QueryCache {
   set<T>(key: QueryKey, value: T, ttl: number = this.defaultTtl): void {
     const norm = normalizeKey(key);
     const now = Date.now();
-    this.cache.set(norm, { expiry: now + ttl, value });
+    const existing = this.cache.get(norm);
+    this.cache.set(norm, {
+      expiry: now + ttl,
+      // Preserve existing queryFn if present so refetch can continue to use it
+      queryFn: existing?.queryFn as (() => AsyncOrSync<T>) | undefined,
+      value
+    });
   }
 
   close(): void {}

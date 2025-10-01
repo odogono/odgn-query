@@ -2,7 +2,7 @@
 /* eslint-disable @nkzw/no-instanceof */
 // Run with: bun run examples/sqlite.ts
 // Creates/uses a file DB at examples/odgnq-example.sqlite
-import { QueryClient } from '../src/client';
+import { QueryClient, type RefetchResult } from '@/client';
 
 const client = new QueryClient({
   cache: 'sqlite',
@@ -56,6 +56,23 @@ const main = async () => {
     throw r2.error;
   }
   console.log('Cached ok');
+
+  // Demonstrate refetchQueries on a branch
+  await client.query({
+    queryFn: () => Promise.resolve('u1'),
+    queryKey: ['users', 1]
+  });
+  await client.query({
+    queryFn: () => Promise.resolve('u2'),
+    queryKey: ['users', 2]
+  });
+  const refetched: RefetchResult[] = await client.refetchQueries(['users'], {
+    concurrency: 2
+  });
+  console.log(
+    'Refetched (sqlite):',
+    refetched.map(r => ({ key: r.key, ok: !r.error }))
+  );
 };
 
 await main();

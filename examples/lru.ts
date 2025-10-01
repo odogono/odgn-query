@@ -1,7 +1,7 @@
 /* eslint-disable @nkzw/no-instanceof */
 /* eslint-disable no-console */
 // Run with: bun run examples/lru.ts
-import { QueryClient } from '../src/client';
+import { QueryClient, type RefetchResult } from '@/client';
 
 const client = new QueryClient({ cache: 'lru', logging: true });
 
@@ -48,6 +48,29 @@ const main = async () => {
     throw r2.error;
   }
   console.log('Cached ok');
+
+  // Demonstrate refetchQueries with multiple keys and concurrency
+  await client.query({
+    queryFn: () => Promise.resolve('u1'),
+    queryKey: ['users', 1]
+  });
+  await client.query({
+    queryFn: () => Promise.resolve('u2'),
+    queryKey: ['users', 2]
+  });
+  await client.query({
+    queryFn: () => Promise.resolve('p1'),
+    queryKey: ['posts', 1]
+  });
+
+  console.log('Refetch users branch with concurrency 2');
+  const refetched: RefetchResult[] = await client.refetchQueries(['users'], {
+    concurrency: 2
+  });
+  console.log(
+    'Refetched results:',
+    refetched.map(r => ({ key: r.key, ok: !r.error }))
+  );
 };
 
 await main();

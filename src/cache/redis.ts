@@ -80,6 +80,28 @@ export class RedisQueryCache {
     return true;
   }
 
+  async findMatchingKeys(
+    matcher: QueryKey | QueryKey[] | ((key: QueryKey) => boolean)
+  ): Promise<QueryKey[]> {
+    const idx = `${this.prefix}:index`;
+    const members: string[] = (await this.redis.smembers(idx)) || [];
+    const keys = members.map(m => JSON.parse(m) as QueryKey);
+
+    if (typeof matcher === 'function') {
+      return keys.filter(k => matcher(k));
+    }
+    if (
+      Array.isArray(matcher) &&
+      matcher.length > 0 &&
+      Array.isArray(matcher[0])
+    ) {
+      const want = new Set((matcher as QueryKey[]).map(k => JSON.stringify(k)));
+      return keys.filter(k => want.has(JSON.stringify(k)));
+    }
+    // prefix
+    return keys.filter(k => this.isKeyPrefixMatch(k, matcher as QueryKey));
+  }
+
   async wrap<T>(
     key: QueryKey,
     fn: () => AsyncOrSync<T>,

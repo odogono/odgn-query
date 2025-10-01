@@ -125,6 +125,48 @@ export class SqliteQueryCache {
     return valueObj as T;
   }
 
+  async findMatchingKeys(
+    matcher: QueryKey | QueryKey[] | ((key: QueryKey) => boolean)
+  ): Promise<QueryKey[]> {
+    // Optimize prefix using LIKE; otherwise enumerate keys and filter
+    if (
+      Array.isArray(matcher) &&
+      matcher.length > 0 &&
+      !Array.isArray((matcher as unknown[])[0])
+    ) {
+      // prefix (single QueryKey)
+      const prefix = matcher as unknown as QueryKey;
+      const norm = JSON.stringify(prefix);
+      const like = this.prefixLike(prefix);
+      const rows = this.db
+        .query(
+          `SELECT key FROM odgnq_cache WHERE namespace=?1 AND (key=?2 OR key LIKE ?3)`
+        )
+        .all(this.ns, norm, like) as { key: string }[];
+      return rows.map(r => JSON.parse(r.key) as QueryKey);
+    }
+
+    // Enumerate all keys and filter for function or explicit list case
+    const rows = this.db
+      .query(`SELECT key FROM odgnq_cache WHERE namespace=?1`)
+      .all(this.ns) as { key: string }[];
+    const keys = rows.map(r => JSON.parse(r.key) as QueryKey);
+
+    if (typeof matcher === 'function') {
+      return keys.filter(k => matcher(k));
+    }
+    if (
+      Array.isArray(matcher) &&
+      matcher.length > 0 &&
+      Array.isArray(matcher[0])
+    ) {
+      const want = new Set((matcher as QueryKey[]).map(k => JSON.stringify(k)));
+      return keys.filter(k => want.has(JSON.stringify(k)));
+    }
+    // Empty prefix means match all
+    return keys;
+  }
+
   async invalidate(key: QueryKey): Promise<void> {
     const norm = normalizeKey(key);
     this.db

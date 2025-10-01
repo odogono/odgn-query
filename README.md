@@ -133,6 +133,38 @@ queryClient.clear();
 await queryClient.clearAll();
 ```
 
+### Refetching
+
+Refetch and refresh cached queries by key, prefix, or predicate. Refetch always executes the original query function and updates the cache value and TTL immediately.
+
+```ts
+// Exact keys
+const results = await queryClient.refetchQueries([['users'], ['user', 1]]);
+
+// Prefix
+const branch = await queryClient.refetchQueries(['users']);
+
+// Predicate
+const subset = await queryClient.refetchQueries(key => key[0] === 'users');
+
+// Error mode: throw on first error
+await queryClient.refetchQueries([['user', 2]], { throwOnError: true });
+
+// Concurrency control (defaults to all-at-once when not throwing)
+await queryClient.refetchQueries(['users'], { concurrency: 4 });
+```
+
+Returns an array of `{ key, data?, error? }`. When `throwOnError: true`, refetch short-circuits on the first error.
+
+Notes:
+
+- Cache is updated with the new value and TTL for each successful refetch.
+- Matching support:
+  - LRU adapter: exact, prefix, and predicate.
+  - Redis/SQLite adapters: exact, prefix, and predicate are supported (async `findMatchingKeys`).
+- For custom adapters, implement `findMatchingKeys(matcher)` returning `Promise<QueryKey[]> | QueryKey[]` to enable prefix/predicate; exact key lists work without it.
+- When `throwOnError: true`, refetch runs sequentially (concurrency effectively 1) and throws on the first error.
+
 ### Direct Data Access
 
 ```ts
@@ -181,6 +213,16 @@ const { data, error } = await client.query({
 if (error) throw error;
 ```
 
+Refetch examples (LRU):
+
+```ts
+// Prefix refetch
+await client.refetchQueries(['users']);
+
+// Predicate refetch
+await client.refetchQueries(key => key[0] === 'users');
+```
+
 ### Redis Storage (Local)
 
 By default, an in-memory LRU cache is used. To use Redis (Bun-only) without breaking browser usage, the Redis code is loaded dynamically only when requested:
@@ -209,6 +251,16 @@ Note: This built-in Redis adapter requires Bun at runtime (uses `Bun.Redis`). In
 ```ts
 // When finished, close the client/adapter
 await client.close();
+```
+
+Refetch examples (Redis):
+
+```ts
+// Prefix refetch (async findMatchingKeys)
+await client.refetchQueries(['users']);
+
+// Predicate refetch
+await client.refetchQueries(key => key[0] === 'users');
 ```
 
 ### SQLite Storage (File DB)
@@ -241,6 +293,16 @@ Note: This built-in SQLite adapter requires Bun at runtime (uses `bun:sqlite`).
 await client.close();
 ```
 
+Refetch examples (SQLite):
+
+```ts
+// Prefix refetch (async findMatchingKeys)
+await client.refetchQueries(['users']);
+
+// Predicate refetch
+await client.refetchQueries(key => key[0] === 'users');
+```
+
 To install dependencies:
 
 ````bash
@@ -262,7 +324,12 @@ const myAdapter: CacheAdapter = {
   invalidateQueries: async prefix => {},
   getEntry: async key => undefined,
   clear: async () => {},
-  set: async (key, value, ttl) => {}
+  set: async (key, value, ttl) => {},
+  // Optional but recommended to enable refetchQueries by prefix/predicate
+  findMatchingKeys: async matcher => {
+    // enumerate your keys and filter with matcher
+    return [];
+  }
 };
 
 const client = new QueryClient({ adapter: myAdapter });
@@ -277,6 +344,36 @@ bun run index.ts
 ````
 
 This project was created using `bun init` in bun v1.2.22. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.
+
+## API
+
+- Types
+  - `QueryKey`: readonly array of primitives, e.g. `['users', 1]`.
+  - `RefetchOptions`: `{ concurrency?: number; throwOnError?: boolean }`.
+  - `RefetchResult`: `{ key: QueryKey; data?: unknown; error?: Error }`.
+  - `CacheAdapter`: pluggable cache interface; `findMatchingKeys` may be async.
+
+- Refetch
+  - Signature: `refetchQueries(matcher, options?) => Promise<RefetchResult[]>`
+  - `matcher`: `QueryKey` (prefix), `QueryKey[]` (exact keys), or `(key) => boolean` predicate.
+  - Behavior: executes stored queryFn for each match; writes fresh value back and refreshes TTL; emits `REFETCH`/`ERROR` events.
+  - Error mode: `throwOnError` short-circuits on first error (sequential). Otherwise runs with optional `concurrency` (defaults to all-at-once).
+
+Example with types:
+
+```ts
+import {
+  queryClient,
+  type RefetchOptions,
+  type RefetchResult
+} from 'odgn-query';
+
+const opts: RefetchOptions = { concurrency: 4 };
+const results: RefetchResult[] = await queryClient.refetchQueries(
+  ['users'],
+  opts
+);
+```
 
 ## License
 
