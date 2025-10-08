@@ -47,7 +47,7 @@ type MutationObject<TArgs extends unknown[], TResult> = {
 
 export type EventData = BaseEvent;
 
-type QueryResult<T> = {
+export type QueryResult<T> = {
   data?: T;
   error?: Error;
 };
