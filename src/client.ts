@@ -360,17 +360,17 @@ export class QueryClient {
 
     // Resolve matching keys via adapter or fallback for explicit list
     let matchingKeys: QueryKey[] = [];
-    if (this.cache.findMatchingKeys) {
-      matchingKeys = await Promise.resolve(
-        this.cache.findMatchingKeys(queryKey)
-      );
-    } else if (
+    if (
       Array.isArray(queryKey) &&
       queryKey.length > 0 &&
       Array.isArray((queryKey as unknown[])[0])
     ) {
-      // Fallback: explicit list of keys
+      // Explicit list of keys — use directly, no cache filtering needed
       matchingKeys = queryKey as QueryKey[];
+    } else if (this.cache.findMatchingKeys) {
+      matchingKeys = await Promise.resolve(
+        this.cache.findMatchingKeys(queryKey)
+      );
     } else {
       throw new Error(
         'refetchQueries requires adapter.findMatchingKeys for this matcher on the current adapter'

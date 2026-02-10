@@ -132,14 +132,6 @@ export class QueryCache {
           value
         });
         return value as T;
-      } catch (error) {
-        // Store the queryFn even on failure so it can be refetched
-        this.cache.set(norm, {
-          expiry: now + ttl,
-          queryFn: fn,
-          value: error as T // Store the error as the value
-        });
-        throw error;
       } finally {
         this.inflight.delete(norm);
       }
