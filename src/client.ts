@@ -41,7 +41,7 @@ type MutationOptions<TArgs extends unknown[], TResult> = {
 type MutationObject<TArgs extends unknown[], TResult> = {
   isError: boolean;
   isSuccess: boolean;
-  mutate: (...args: TArgs) => Promise<TResult>;
+  mutate: (...args: TArgs) => void;
   mutateAsync: (...args: TArgs) => Promise<TResult>;
 };
 
@@ -333,7 +333,9 @@ export class QueryClient {
       get isSuccess() {
         return isSuccess;
       },
-      mutate: executeMutation,
+      mutate: (...args: TArgs): void => {
+        executeMutation(...args).catch(() => {});
+      },
       mutateAsync: executeMutation
     };
   }
@@ -495,9 +497,6 @@ export class QueryClient {
     return 0;
   }
 }
-
-// Export global instance
-export const queryClient = new QueryClient({ logging: true });
 
 // ----- Events typing -----
 export type EventType =
