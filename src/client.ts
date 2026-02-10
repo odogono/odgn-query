@@ -4,13 +4,12 @@ import mitt from 'mitt';
 import {
   QueryCache,
   normalizeKey,
+  type AsyncOrSync,
   type CacheAdapter,
   type QueryKey
 } from './cache';
 import { createLog } from './helpers/log';
 import { ONE_MINUTE_IN_MS } from './helpers/time';
-
-type AsyncOrSync<T> = Promise<T> | T;
 
 type MutationFn<TArgs extends unknown[], TResult> = (
   ...args: TArgs
@@ -181,8 +180,11 @@ export class QueryClient {
     }
   }
 
-  private enqueue(op: () => Promise<void>) {
-    this.pending = (this.pending ?? Promise.resolve()).then(op).catch(() => {});
+  private enqueue(op: () => Promise<void>): Promise<void> {
+    const result = (this.pending ?? Promise.resolve()).then(op);
+    // Keep the chain alive for subsequent operations even if this one fails
+    this.pending = result.catch(() => {});
+    return result;
   }
 
   private emitEvent(type: EventType, key?: QueryKey, meta?: unknown) {
@@ -340,16 +342,16 @@ export class QueryClient {
     };
   }
 
-  invalidate(key: QueryKey) {
+  invalidate(key: QueryKey): Promise<void> {
     this.emitEvent('INVALIDATE', key);
-    this.enqueue(async () => {
+    return this.enqueue(async () => {
       await this.cache.invalidate(key);
     });
   }
 
-  invalidateQueries(prefix: QueryKey) {
+  invalidateQueries(prefix: QueryKey): Promise<void> {
     this.emitEvent('INVALIDATE_BRANCH', prefix);
-    this.enqueue(async () => {
+    return this.enqueue(async () => {
       await this.cache.invalidateQueries(prefix);
     });
   }
@@ -447,17 +449,11 @@ export class QueryClient {
     return results;
   }
 
-  clear() {
+  clear(): Promise<void> {
     this.emitEvent('CLEAR_ALL');
-    this.enqueue(async () => {
+    return this.enqueue(async () => {
       await this.cache.clear();
     });
-  }
-
-  async clearAll(): Promise<void> {
-    this.emitEvent('CLEAR_ALL');
-    await this.ensureReady();
-    await Promise.resolve(this.cache.clear());
   }
 
   on<TEvent extends EventType>(

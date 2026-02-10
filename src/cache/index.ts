@@ -26,6 +26,21 @@ export type CacheEntry<T> = {
 
 export const normalizeKey = (key: QueryKey): string => JSON.stringify(key);
 
+export const isKeyPrefixMatch = (key: QueryKey, prefix: QueryKey): boolean => {
+  if (prefix.length === 0) {
+    return true;
+  }
+  if (key.length < prefix.length) {
+    return false;
+  }
+  for (let i = 0; i < prefix.length; i++) {
+    if (key[i] !== prefix[i]) {
+      return false;
+    }
+  }
+  return true;
+};
+
 // Public cache adapter contract used by QueryClient and adapters
 export type CacheAdapter = {
   clear: () => Promise<void> | void;
@@ -147,39 +162,12 @@ export class QueryCache {
   invalidateQueries(prefix: QueryKey): void {
     for (const k of this.cache.keys()) {
       const key = JSON.parse(k) as unknown as QueryKey;
-      if (this.isKeyPrefixMatch(key, prefix)) {
+      if (isKeyPrefixMatch(key, prefix)) {
         this.cache.delete(k);
       }
     }
   }
 
-  private isKeyPrefixMatch(key: QueryKey, prefix: QueryKey): boolean {
-    if (prefix.length === 0) {
-      return true;
-    }
-    if (key.length < prefix.length) {
-      return false;
-    }
-
-    for (let i = 0; i < prefix.length; i++) {
-      if (key[i] !== prefix[i]) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  private isKeyExactMatch(key: QueryKey, target: QueryKey): boolean {
-    if (key.length !== target.length) {
-      return false;
-    }
-    for (let i = 0; i < key.length; i++) {
-      if (key[i] !== target[i]) {
-        return false;
-      }
-    }
-    return true;
-  }
 
   findMatchingKeys(
     matcher: QueryKey | QueryKey[] | ((key: QueryKey) => boolean)
@@ -212,7 +200,7 @@ export class QueryCache {
       const keys: QueryKey[] = [];
       for (const k of this.cache.keys()) {
         const key = JSON.parse(k) as QueryKey;
-        if (this.isKeyPrefixMatch(key, matcher as QueryKey)) {
+        if (isKeyPrefixMatch(key, matcher as QueryKey)) {
           keys.push(key);
         }
       }
@@ -220,7 +208,6 @@ export class QueryCache {
     }
   }
 
-  // in cache.ts (the SWR-enabled QueryCache version)
   getEntry(key: QueryKey) {
     const e = this.cache.get(normalizeKey(key));
     return e

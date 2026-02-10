@@ -15,6 +15,7 @@ export class SqliteQueryCache {
   private db: Database;
   private readonly ns: string;
   private readonly defaultTtl: number;
+  private readonly inflight = new Map<string, Promise<unknown>>();
   private readonly refreshing = new Map<string, Promise<unknown>>();
 
   private constructor(db: Database, ns: string, defaultTtl: number) {
@@ -112,17 +113,29 @@ export class SqliteQueryCache {
       }
     }
 
-    // miss
-    const valueObj = await fn();
-    const value = SuperJSON.stringify(valueObj);
-    const expiry = now + ttl;
-    this.db
-      .query(
-        `INSERT INTO odgnq_cache(namespace,key,expiry,value) VALUES(?1,?2,?3,?4)
-         ON CONFLICT(namespace,key) DO UPDATE SET expiry=excluded.expiry, value=excluded.value`
-      )
-      .run(this.ns, norm, expiry, value);
-    return valueObj as T;
+    // miss — coalesce concurrent requests
+    const existing = this.inflight.get(norm) as Promise<T> | undefined;
+    if (existing) {
+      return existing;
+    }
+    const p = (async () => {
+      try {
+        const valueObj = await fn();
+        const value = SuperJSON.stringify(valueObj);
+        const expiry = now + ttl;
+        this.db
+          .query(
+            `INSERT INTO odgnq_cache(namespace,key,expiry,value) VALUES(?1,?2,?3,?4)
+             ON CONFLICT(namespace,key) DO UPDATE SET expiry=excluded.expiry, value=excluded.value`
+          )
+          .run(this.ns, norm, expiry, value);
+        return valueObj as T;
+      } finally {
+        this.inflight.delete(norm);
+      }
+    })();
+    this.inflight.set(norm, p as Promise<unknown>);
+    return p;
   }
 
   async findMatchingKeys(

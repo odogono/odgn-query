@@ -171,7 +171,7 @@ describe('QueryClient', () => {
     expect(callCount2).toBe(1);
   });
 
-  test('clearAll removes all cached queries and awaits completion', async () => {
+  test('clear is awaitable', async () => {
     await client.query({
       queryFn: () => Promise.resolve('value1'),
       queryKey: ['test1']
@@ -181,7 +181,7 @@ describe('QueryClient', () => {
       queryKey: ['test2']
     });
 
-    await client.clearAll();
+    await client.clear();
 
     let callCount1 = 0;
     let callCount2 = 0;
