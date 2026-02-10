@@ -33,7 +33,7 @@ describe('QueryClient Cases', () => {
 
     expect(result2.data).toEqual({ id: 1, name: 'John' });
 
-    client.invalidateQueries(['test']);
+    await client.invalidateQueries(['test']);
 
     const result3 = await client.query({
       queryFn,

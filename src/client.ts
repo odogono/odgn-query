@@ -222,13 +222,16 @@ export class QueryClient {
     retry: number,
     retryDelay: number | ((attempt: number) => number)
   ): Promise<T> {
+    const maxAttempts = Number.isFinite(retry)
+      ? Math.max(0, Math.floor(retry))
+      : 0;
     let lastError: Error;
-    for (let attempt = 0; attempt <= retry; attempt++) {
+    for (let attempt = 0; attempt <= maxAttempts; attempt++) {
       try {
         return await fn();
       } catch (error) {
         lastError = error as Error;
-        if (attempt < retry) {
+        if (attempt < maxAttempts) {
           const delay =
             typeof retryDelay === 'function'
               ? retryDelay(attempt)
