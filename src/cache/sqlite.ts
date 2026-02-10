@@ -58,8 +58,9 @@ export class SqliteQueryCache {
 
   private prefixLike(prefix: QueryKey): string {
     const norm = JSON.stringify(prefix);
-    // match any array that starts with the prefix elements followed by a comma
-    return norm.slice(0, -1) + ',%';
+    // Escape LIKE wildcards (%, _, \) in the key before appending the wildcard suffix
+    const escaped = norm.slice(0, -1).replaceAll(/[%\\_]/g, String.raw`\$&`);
+    return escaped + ',%';
   }
 
   async wrap<T>(
@@ -153,7 +154,7 @@ export class SqliteQueryCache {
       const like = this.prefixLike(prefix);
       const rows = this.db
         .query(
-          `SELECT key FROM odgnq_cache WHERE namespace=?1 AND (key=?2 OR key LIKE ?3)`
+          String.raw`SELECT key FROM odgnq_cache WHERE namespace=?1 AND (key=?2 OR key LIKE ?3 ESCAPE '\')`
         )
         .all(this.ns, norm, like) as { key: string }[];
       return rows.map(r => JSON.parse(r.key) as QueryKey);
@@ -192,7 +193,7 @@ export class SqliteQueryCache {
     const like = this.prefixLike(prefix);
     this.db
       .query(
-        `DELETE FROM odgnq_cache WHERE namespace=?1 AND (key=?2 OR key LIKE ?3)`
+        String.raw`DELETE FROM odgnq_cache WHERE namespace=?1 AND (key=?2 OR key LIKE ?3 ESCAPE '\')`
       )
       .run(this.ns, norm, like);
   }

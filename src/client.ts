@@ -64,6 +64,8 @@ export type QueryClientOptions = {
     prefix?: string;
     url?: string;
   };
+  retry?: number; // default number of retries (default: 0 = no retry)
+  retryDelay?: number | ((attempt: number) => number); // ms or function (default: 1000)
   sqlite?: {
     defaultTtl?: number;
     namespace?: string;
@@ -83,6 +85,8 @@ export class QueryClient {
   private queryFnRegistry = new Map<string, () => AsyncOrSync<unknown>>();
   private defaults = {
     backgroundRefresh: true,
+    retry: 0,
+    retryDelay: 1000 as number | ((attempt: number) => number),
     ttl: ONE_MINUTE_IN_MS
   };
   private _stats = {
@@ -101,6 +105,8 @@ export class QueryClient {
     defaultTtl,
     logging = true,
     redis,
+    retry,
+    retryDelay,
     sqlite
   }: QueryClientOptions = {}) {
     this.logging = logging;
@@ -109,6 +115,12 @@ export class QueryClient {
     }
     if (defaultBackgroundRefresh !== undefined) {
       this.defaults.backgroundRefresh = defaultBackgroundRefresh;
+    }
+    if (retry !== undefined) {
+      this.defaults.retry = retry;
+    }
+    if (retryDelay !== undefined) {
+      this.defaults.retryDelay = retryDelay;
     }
 
     if (adapter) {
@@ -205,17 +217,44 @@ export class QueryClient {
     this.emitter.emit('event', ev);
   }
 
+  private async executeWithRetry<T>(
+    fn: () => AsyncOrSync<T>,
+    retry: number,
+    retryDelay: number | ((attempt: number) => number)
+  ): Promise<T> {
+    let lastError: Error;
+    for (let attempt = 0; attempt <= retry; attempt++) {
+      try {
+        return await fn();
+      } catch (error) {
+        lastError = error as Error;
+        if (attempt < retry) {
+          const delay =
+            typeof retryDelay === 'function'
+              ? retryDelay(attempt)
+              : retryDelay * 2 ** attempt;
+          await new Promise(res => setTimeout(res, delay));
+        }
+      }
+    }
+    throw lastError!;
+  }
+
   // ---------------- QUERIES ----------------
   async query<T>(opts: {
     backgroundRefresh?: boolean;
     queryFn: () => AsyncOrSync<T>;
     queryKey: QueryKey;
+    retry?: number;
+    retryDelay?: number | ((attempt: number) => number);
     ttl?: number;
   }): Promise<QueryResult<T>> {
     const backgroundRefresh =
       opts.backgroundRefresh ?? this.defaults.backgroundRefresh;
     const { queryFn, queryKey } = opts;
     const ttl = opts.ttl ?? this.defaults.ttl;
+    const retry = opts.retry ?? this.defaults.retry;
+    const retryDelay = opts.retryDelay ?? this.defaults.retryDelay;
 
     await this.ensureReady();
 
@@ -239,7 +278,7 @@ export class QueryClient {
         queryKey,
         async () => {
           this.emitEvent('FETCH', queryKey);
-          return queryFn();
+          return this.executeWithRetry(queryFn, retry, retryDelay);
         },
         ttl,
         backgroundRefresh

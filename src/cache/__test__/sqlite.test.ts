@@ -143,6 +143,40 @@ describe('SqliteQueryCache adapter', () => {
     expect(b).toBe('4');
   });
 
+  test('LIKE wildcards in keys are escaped correctly', async () => {
+    // Keys containing SQL LIKE wildcards should match exactly, not as patterns
+    await cache.wrap(['users', '100%'], () => Promise.resolve('percent'));
+    await cache.wrap(['users', 'a_b'], () => Promise.resolve('underscore'));
+    await cache.wrap(['users', 'normal'], () => Promise.resolve('normal'));
+
+    // Prefix query with wildcard chars in the prefix itself
+    const keys = await cache.findMatchingKeys(['users', '100%']);
+    expect(keys).toHaveLength(1);
+    expect(keys[0]).toEqual(['users', '100%']);
+
+    const keys2 = await cache.findMatchingKeys(['users', 'a_b']);
+    expect(keys2).toHaveLength(1);
+    expect(keys2[0]).toEqual(['users', 'a_b']);
+
+    // invalidateQueries should only affect exact prefix matches
+    await cache.invalidateQueries(['users', '100%']);
+    const afterInvalidate = await cache.wrap(['users', '100%'], () =>
+      Promise.resolve('refetched')
+    );
+    expect(afterInvalidate).toBe('refetched');
+
+    // 'normal' and 'a_b' should still be cached
+    const stillCached = await cache.wrap(['users', 'normal'], () =>
+      Promise.resolve('should not be called')
+    );
+    expect(stillCached).toBe('normal');
+
+    const stillCached2 = await cache.wrap(['users', 'a_b'], () =>
+      Promise.resolve('should not be called')
+    );
+    expect(stillCached2).toBe('underscore');
+  });
+
   test('background refresh works', async () => {
     const key = ['bg'];
     let count = 0;
