@@ -1,5 +1,4 @@
 export {
-  queryClient,
   QueryClient,
   type QueryClientOptions,
   type RefetchOptions,

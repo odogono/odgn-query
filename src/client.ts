@@ -4,13 +4,12 @@ import mitt from 'mitt';
 import {
   QueryCache,
   normalizeKey,
+  type AsyncOrSync,
   type CacheAdapter,
   type QueryKey
 } from './cache';
 import { createLog } from './helpers/log';
 import { ONE_MINUTE_IN_MS } from './helpers/time';
-
-type AsyncOrSync<T> = Promise<T> | T;
 
 type MutationFn<TArgs extends unknown[], TResult> = (
   ...args: TArgs
@@ -41,7 +40,7 @@ type MutationOptions<TArgs extends unknown[], TResult> = {
 type MutationObject<TArgs extends unknown[], TResult> = {
   isError: boolean;
   isSuccess: boolean;
-  mutate: (...args: TArgs) => Promise<TResult>;
+  mutate: (...args: TArgs) => void;
   mutateAsync: (...args: TArgs) => Promise<TResult>;
 };
 
@@ -65,6 +64,8 @@ export type QueryClientOptions = {
     prefix?: string;
     url?: string;
   };
+  retry?: number; // default number of retries (default: 0 = no retry)
+  retryDelay?: number | ((attempt: number) => number); // ms or function (default: 1000)
   sqlite?: {
     defaultTtl?: number;
     namespace?: string;
@@ -84,6 +85,8 @@ export class QueryClient {
   private queryFnRegistry = new Map<string, () => AsyncOrSync<unknown>>();
   private defaults = {
     backgroundRefresh: true,
+    retry: 0,
+    retryDelay: 1000 as number | ((attempt: number) => number),
     ttl: ONE_MINUTE_IN_MS
   };
   private _stats = {
@@ -102,6 +105,8 @@ export class QueryClient {
     defaultTtl,
     logging = true,
     redis,
+    retry,
+    retryDelay,
     sqlite
   }: QueryClientOptions = {}) {
     this.logging = logging;
@@ -110,6 +115,12 @@ export class QueryClient {
     }
     if (defaultBackgroundRefresh !== undefined) {
       this.defaults.backgroundRefresh = defaultBackgroundRefresh;
+    }
+    if (retry !== undefined) {
+      this.defaults.retry = retry;
+    }
+    if (retryDelay !== undefined) {
+      this.defaults.retryDelay = retryDelay;
     }
 
     if (adapter) {
@@ -181,8 +192,11 @@ export class QueryClient {
     }
   }
 
-  private enqueue(op: () => Promise<void>) {
-    this.pending = (this.pending ?? Promise.resolve()).then(op).catch(() => {});
+  private enqueue(op: () => Promise<void>): Promise<void> {
+    const result = (this.pending ?? Promise.resolve()).then(op);
+    // Keep the chain alive for subsequent operations even if this one fails
+    this.pending = result.catch(() => {});
+    return result;
   }
 
   private emitEvent(type: EventType, key?: QueryKey, meta?: unknown) {
@@ -203,17 +217,47 @@ export class QueryClient {
     this.emitter.emit('event', ev);
   }
 
+  private async executeWithRetry<T>(
+    fn: () => AsyncOrSync<T>,
+    retry: number,
+    retryDelay: number | ((attempt: number) => number)
+  ): Promise<T> {
+    const maxAttempts = Number.isFinite(retry)
+      ? Math.max(0, Math.floor(retry))
+      : 0;
+    let lastError: Error;
+    for (let attempt = 0; attempt <= maxAttempts; attempt++) {
+      try {
+        return await fn();
+      } catch (error) {
+        lastError = error as Error;
+        if (attempt < maxAttempts) {
+          const delay =
+            typeof retryDelay === 'function'
+              ? retryDelay(attempt)
+              : retryDelay * 2 ** attempt;
+          await new Promise(res => setTimeout(res, delay));
+        }
+      }
+    }
+    throw lastError!;
+  }
+
   // ---------------- QUERIES ----------------
   async query<T>(opts: {
     backgroundRefresh?: boolean;
     queryFn: () => AsyncOrSync<T>;
     queryKey: QueryKey;
+    retry?: number;
+    retryDelay?: number | ((attempt: number) => number);
     ttl?: number;
   }): Promise<QueryResult<T>> {
     const backgroundRefresh =
       opts.backgroundRefresh ?? this.defaults.backgroundRefresh;
     const { queryFn, queryKey } = opts;
     const ttl = opts.ttl ?? this.defaults.ttl;
+    const retry = opts.retry ?? this.defaults.retry;
+    const retryDelay = opts.retryDelay ?? this.defaults.retryDelay;
 
     await this.ensureReady();
 
@@ -237,7 +281,7 @@ export class QueryClient {
         queryKey,
         async () => {
           this.emitEvent('FETCH', queryKey);
-          return queryFn();
+          return this.executeWithRetry(queryFn, retry, retryDelay);
         },
         ttl,
         backgroundRefresh
@@ -333,21 +377,23 @@ export class QueryClient {
       get isSuccess() {
         return isSuccess;
       },
-      mutate: executeMutation,
+      mutate: (...args: TArgs): void => {
+        executeMutation(...args).catch(() => {});
+      },
       mutateAsync: executeMutation
     };
   }
 
-  invalidate(key: QueryKey) {
+  invalidate(key: QueryKey): Promise<void> {
     this.emitEvent('INVALIDATE', key);
-    this.enqueue(async () => {
+    return this.enqueue(async () => {
       await this.cache.invalidate(key);
     });
   }
 
-  invalidateQueries(prefix: QueryKey) {
+  invalidateQueries(prefix: QueryKey): Promise<void> {
     this.emitEvent('INVALIDATE_BRANCH', prefix);
-    this.enqueue(async () => {
+    return this.enqueue(async () => {
       await this.cache.invalidateQueries(prefix);
     });
   }
@@ -360,17 +406,17 @@ export class QueryClient {
 
     // Resolve matching keys via adapter or fallback for explicit list
     let matchingKeys: QueryKey[] = [];
-    if (this.cache.findMatchingKeys) {
-      matchingKeys = await Promise.resolve(
-        this.cache.findMatchingKeys(queryKey)
-      );
-    } else if (
+    if (
       Array.isArray(queryKey) &&
       queryKey.length > 0 &&
       Array.isArray((queryKey as unknown[])[0])
     ) {
-      // Fallback: explicit list of keys
+      // Explicit list of keys — use directly, no cache filtering needed
       matchingKeys = queryKey as QueryKey[];
+    } else if (this.cache.findMatchingKeys) {
+      matchingKeys = await Promise.resolve(
+        this.cache.findMatchingKeys(queryKey)
+      );
     } else {
       throw new Error(
         'refetchQueries requires adapter.findMatchingKeys for this matcher on the current adapter'
@@ -445,17 +491,11 @@ export class QueryClient {
     return results;
   }
 
-  clear() {
+  clear(): Promise<void> {
     this.emitEvent('CLEAR_ALL');
-    this.enqueue(async () => {
+    return this.enqueue(async () => {
       await this.cache.clear();
     });
-  }
-
-  async clearAll(): Promise<void> {
-    this.emitEvent('CLEAR_ALL');
-    await this.ensureReady();
-    await Promise.resolve(this.cache.clear());
   }
 
   on<TEvent extends EventType>(
@@ -495,9 +535,6 @@ export class QueryClient {
     return 0;
   }
 }
-
-// Export global instance
-export const queryClient = new QueryClient({ logging: true });
 
 // ----- Events typing -----
 export type EventType =

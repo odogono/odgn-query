@@ -15,6 +15,7 @@ export class SqliteQueryCache {
   private db: Database;
   private readonly ns: string;
   private readonly defaultTtl: number;
+  private readonly inflight = new Map<string, Promise<unknown>>();
   private readonly refreshing = new Map<string, Promise<unknown>>();
 
   private constructor(db: Database, ns: string, defaultTtl: number) {
@@ -57,8 +58,9 @@ export class SqliteQueryCache {
 
   private prefixLike(prefix: QueryKey): string {
     const norm = JSON.stringify(prefix);
-    // match any array that starts with the prefix elements followed by a comma
-    return norm.slice(0, -1) + ',%';
+    // Escape LIKE wildcards (%, _, \) in the key before appending the wildcard suffix
+    const escaped = norm.slice(0, -1).replaceAll(/[%\\_]/g, String.raw`\$&`);
+    return escaped + ',%';
   }
 
   async wrap<T>(
@@ -112,17 +114,29 @@ export class SqliteQueryCache {
       }
     }
 
-    // miss
-    const valueObj = await fn();
-    const value = SuperJSON.stringify(valueObj);
-    const expiry = now + ttl;
-    this.db
-      .query(
-        `INSERT INTO odgnq_cache(namespace,key,expiry,value) VALUES(?1,?2,?3,?4)
-         ON CONFLICT(namespace,key) DO UPDATE SET expiry=excluded.expiry, value=excluded.value`
-      )
-      .run(this.ns, norm, expiry, value);
-    return valueObj as T;
+    // miss — coalesce concurrent requests
+    const existing = this.inflight.get(norm) as Promise<T> | undefined;
+    if (existing) {
+      return existing;
+    }
+    const p = (async () => {
+      try {
+        const valueObj = await fn();
+        const value = SuperJSON.stringify(valueObj);
+        const expiry = now + ttl;
+        this.db
+          .query(
+            `INSERT INTO odgnq_cache(namespace,key,expiry,value) VALUES(?1,?2,?3,?4)
+             ON CONFLICT(namespace,key) DO UPDATE SET expiry=excluded.expiry, value=excluded.value`
+          )
+          .run(this.ns, norm, expiry, value);
+        return valueObj as T;
+      } finally {
+        this.inflight.delete(norm);
+      }
+    })();
+    this.inflight.set(norm, p as Promise<unknown>);
+    return p;
   }
 
   async findMatchingKeys(
@@ -140,7 +154,7 @@ export class SqliteQueryCache {
       const like = this.prefixLike(prefix);
       const rows = this.db
         .query(
-          `SELECT key FROM odgnq_cache WHERE namespace=?1 AND (key=?2 OR key LIKE ?3)`
+          String.raw`SELECT key FROM odgnq_cache WHERE namespace=?1 AND (key=?2 OR key LIKE ?3 ESCAPE '\')`
         )
         .all(this.ns, norm, like) as { key: string }[];
       return rows.map(r => JSON.parse(r.key) as QueryKey);
@@ -179,7 +193,7 @@ export class SqliteQueryCache {
     const like = this.prefixLike(prefix);
     this.db
       .query(
-        `DELETE FROM odgnq_cache WHERE namespace=?1 AND (key=?2 OR key LIKE ?3)`
+        String.raw`DELETE FROM odgnq_cache WHERE namespace=?1 AND (key=?2 OR key LIKE ?3 ESCAPE '\')`
       )
       .run(this.ns, norm, like);
   }

@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.3.0 - 2026-02-10
+
+Fixed
+
+- LRU cache no longer stores errors as values on miss path, preventing cache poisoning for the TTL duration.
+- `mutate` is now fire-and-forget (does not throw); `mutateAsync` returns a promise and throws on error.
+- `invalidate`/`invalidateQueries`/`clear` now return promises so callers can detect errors.
+- SQLite LIKE queries escape `%`, `_`, and `\` wildcards in keys to prevent incorrect prefix matches.
+
+Added
+
+- Opt-in retry with exponential backoff: `retry` and `retryDelay` options on QueryClient and per-query.
+- Subpath exports `odgn-query/redis` and `odgn-query/sqlite` for direct adapter imports.
+- Inflight miss deduplication for Redis and SQLite adapters (matching LRU behavior).
+- Redis TTL safety net: `EXPIRE` set alongside embedded expiry to prevent unbounded growth on crash.
+
+Changed
+
+- Removed global singleton export; consumers must instantiate `QueryClient` explicitly.
+- Unified `AsyncOrSync<T>` to single definition in `src/cache/index.ts`.
+- Extracted shared `isKeyPrefixMatch` utility; removed duplicates from adapters.
+- Merged `clear()`/`clearAll()` into single awaitable `clear()`.
+- Removed dead `isKeyExactMatch` method and stale comments.
+- Pinned `@types/bun` to `^1.3.8` instead of `"latest"`.
+
 ## 0.2.1 - 2025-10-08
 
 Added

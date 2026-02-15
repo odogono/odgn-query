@@ -1,7 +1,7 @@
 // cache_redis.ts
 import SuperJSON from 'superjson';
 
-import { normalizeKey, type AsyncOrSync, type QueryKey } from '.';
+import { isKeyPrefixMatch, normalizeKey, type AsyncOrSync, type QueryKey } from '.';
 import { ONE_MINUTE_IN_MS } from '../helpers/time';
 
 // Minimal interface alignment with QueryCache
@@ -16,6 +16,7 @@ type RedisLike = {
   close?: () => Promise<void> | void;
   del: (...keys: string[]) => Promise<unknown> | unknown;
   disconnect?: () => Promise<void> | void;
+  expire: (key: string, seconds: number) => Promise<unknown> | unknown;
   get: (key: string) => Promise<string | null> | string | null;
   quit?: () => Promise<void> | void;
   sadd: (key: string, member: string) => Promise<unknown> | unknown;
@@ -28,6 +29,7 @@ export class RedisQueryCache {
   private redis: RedisLike;
   private readonly prefix: string;
   private readonly defaultTtl: number;
+  private readonly inflight = new Map<string, Promise<unknown>>();
   private readonly refreshing = new Map<string, Promise<unknown>>();
 
   private constructor(
@@ -65,19 +67,16 @@ export class RedisQueryCache {
     return `${this.prefix}:${norm}`;
   }
 
-  private isKeyPrefixMatch(key: QueryKey, prefix: QueryKey): boolean {
-    if (prefix.length === 0) {
-      return true;
-    }
-    if (key.length < prefix.length) {
-      return false;
-    }
-    for (let i = 0; i < prefix.length; i++) {
-      if (key[i] !== prefix[i]) {
-        return false;
-      }
-    }
-    return true;
+  /** SET value and apply a Redis-level EXPIRE as a safety net for stale entries */
+  private async setWithTtl(
+    redisKey: string,
+    value: string,
+    ttlMs: number
+  ): Promise<void> {
+    await this.redis.set(redisKey, value);
+    // Use 2x TTL (minimum 60s) so Redis auto-evicts even if gc() never runs
+    const expireSec = Math.max(60, Math.ceil((ttlMs * 2) / 1000));
+    await this.redis.expire(redisKey, expireSec);
   }
 
   async findMatchingKeys(
@@ -99,7 +98,7 @@ export class RedisQueryCache {
       return keys.filter(k => want.has(JSON.stringify(k)));
     }
     // prefix
-    return keys.filter(k => this.isKeyPrefixMatch(k, matcher as QueryKey));
+    return keys.filter(k => isKeyPrefixMatch(k, matcher as QueryKey));
   }
 
   async wrap<T>(
@@ -124,7 +123,7 @@ export class RedisQueryCache {
           try {
             const newVal = await fn();
             const newEntry = { expiry: Date.now() + ttl, value: newVal };
-            await this.redis.set(this.k(norm), SuperJSON.stringify(newEntry));
+            await this.setWithTtl(this.k(norm), SuperJSON.stringify(newEntry), ttl);
             await this.redis.sadd(`${this.prefix}:index`, norm);
             return newVal;
           } finally {
@@ -136,18 +135,30 @@ export class RedisQueryCache {
       } else {
         const value = await fn();
         const newEntry = { expiry: now + ttl, value };
-        await this.redis.set(this.k(norm), SuperJSON.stringify(newEntry));
+        await this.setWithTtl(this.k(norm), SuperJSON.stringify(newEntry), ttl);
         await this.redis.sadd(`${this.prefix}:index`, norm);
         return value as T;
       }
     }
 
-    // cache miss
-    const value = await fn();
-    const newEntry = { expiry: now + ttl, value };
-    await this.redis.set(this.k(norm), SuperJSON.stringify(newEntry));
-    await this.redis.sadd(`${this.prefix}:index`, norm);
-    return value as T;
+    // cache miss — coalesce concurrent requests
+    const existing = this.inflight.get(norm) as Promise<T> | undefined;
+    if (existing) {
+      return existing;
+    }
+    const p = (async () => {
+      try {
+        const value = await fn();
+        const newEntry = { expiry: now + ttl, value };
+        await this.setWithTtl(this.k(norm), SuperJSON.stringify(newEntry), ttl);
+        await this.redis.sadd(`${this.prefix}:index`, norm);
+        return value as T;
+      } finally {
+        this.inflight.delete(norm);
+      }
+    })();
+    this.inflight.set(norm, p as Promise<unknown>);
+    return p;
   }
 
   async invalidate(key: QueryKey): Promise<void> {
@@ -161,7 +172,7 @@ export class RedisQueryCache {
       (await this.redis.smembers(`${this.prefix}:index`)) || [];
     for (const norm of members) {
       const k = JSON.parse(norm) as unknown as QueryKey;
-      if (this.isKeyPrefixMatch(k, prefix)) {
+      if (isKeyPrefixMatch(k, prefix)) {
         await this.redis.del(this.k(norm));
         await this.redis.srem(`${this.prefix}:index`, norm);
       }
@@ -195,7 +206,7 @@ export class RedisQueryCache {
   ): Promise<void> {
     const norm = normalizeKey(key);
     const entry = { expiry: Date.now() + ttl, value };
-    await this.redis.set(this.k(norm), SuperJSON.stringify(entry));
+    await this.setWithTtl(this.k(norm), SuperJSON.stringify(entry), ttl);
     await this.redis.sadd(`${this.prefix}:index`, norm);
   }
 

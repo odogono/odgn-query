@@ -20,6 +20,9 @@ class FakeRedis {
     this.store.set(key, value);
     return 'OK';
   }
+  async expire(_key: string, _seconds: number) {
+    return 1;
+  }
   async del(...keys: string[]) {
     let count = 0;
     for (const k of keys) {

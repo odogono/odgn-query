@@ -126,6 +126,28 @@ describe('QueryCache', () => {
     expect(callCount).toBe(2);
   });
 
+  test('errors are not cached — retry can succeed', async () => {
+    const key = ['failing'];
+    let callCount = 0;
+
+    // First call throws
+    await expect(
+      cache.wrap(key, () => {
+        callCount++;
+        return Promise.reject(new Error('fail'));
+      })
+    ).rejects.toThrow('fail');
+    expect(callCount).toBe(1);
+
+    // Second call should re-execute the query function (not return cached error)
+    const result = await cache.wrap(key, () => {
+      callCount++;
+      return Promise.resolve('success');
+    });
+    expect(result).toBe('success');
+    expect(callCount).toBe(2);
+  });
+
   test('coalesces concurrent misses', async () => {
     const key = ['concurrent'];
     const cache = new QueryCache({ defaultTtl: 1000, maxSize: 10 });

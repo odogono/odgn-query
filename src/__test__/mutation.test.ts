@@ -15,7 +15,7 @@ describe('Mutations', () => {
       mutationFn: (id: number, name: string) => Promise.resolve({ id, name })
     });
 
-    const result = await updateUser.mutate(1, 'updated');
+    const result = await updateUser.mutateAsync(1, 'updated');
     expect(result).toEqual({ id: 1, name: 'updated' });
   });
 
@@ -28,7 +28,7 @@ describe('Mutations', () => {
     expect(mutation.isSuccess).toBe(false);
     expect(mutation.isError).toBe(false);
 
-    await mutation.mutate('hello');
+    await mutation.mutateAsync('hello');
 
     expect(mutation.isSuccess).toBe(true);
     expect(mutation.isError).toBe(false);
@@ -44,7 +44,7 @@ describe('Mutations', () => {
     expect(mutation.isError).toBe(false);
 
     try {
-      await mutation.mutate();
+      await mutation.mutateAsync();
     } catch (error) {
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toBe('Test error');
@@ -81,7 +81,7 @@ describe('Mutations', () => {
       }
     });
 
-    const result = await mutation.mutate(10);
+    const result = await mutation.mutateAsync(10);
     expect(result).toBe(20);
     expect(events).toEqual(['onMutate', 'onSuccess', 'onSettled']);
   });
@@ -112,7 +112,7 @@ describe('Mutations', () => {
     });
 
     try {
-      await mutation.mutate();
+      await mutation.mutateAsync();
     } catch (error) {
       expect((error as Error).message).toBe('Mutation failed');
     }
@@ -120,17 +120,28 @@ describe('Mutations', () => {
     expect(events).toEqual(['onMutate', 'onError', 'onSettled']);
   });
 
-  test('mutate and mutateAsync are equivalent', async () => {
+  test('mutate is fire-and-forget, mutateAsync returns a promise', async () => {
+    const results: string[] = [];
     const mutation = client.mutation({
-      key: 'testEquivalence',
-      mutationFn: (value: string) => Promise.resolve(value.toUpperCase())
+      key: 'testDifference',
+      mutationFn: (value: string) => Promise.resolve(value.toUpperCase()),
+      onSuccess: data => {
+        results.push(data);
+      }
     });
 
-    const result1 = await mutation.mutate('hello');
-    const result2 = await mutation.mutateAsync('world');
+    // mutate returns void (fire-and-forget)
+    const voidResult = mutation.mutate('hello');
+    expect(voidResult).toBeUndefined();
 
-    expect(result1).toBe('HELLO');
-    expect(result2).toBe('WORLD');
+    // mutateAsync returns a promise with the result
+    const asyncResult = await mutation.mutateAsync('world');
+    expect(asyncResult).toBe('WORLD');
+
+    // Wait for the fire-and-forget mutate to settle
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(results).toContain('HELLO');
+    expect(results).toContain('WORLD');
   });
 
   test('manual invalidation in onSuccess callback', async () => {
@@ -151,7 +162,7 @@ describe('Mutations', () => {
     });
 
     // Execute mutation
-    const result = await updateUser.mutate(1, 'updated');
+    const result = await updateUser.mutateAsync(1, 'updated');
     expect(result).toEqual({ id: 1, name: 'updated' });
 
     // Query should be invalidated and refetch

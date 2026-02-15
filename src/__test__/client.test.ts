@@ -171,7 +171,7 @@ describe('QueryClient', () => {
     expect(callCount2).toBe(1);
   });
 
-  test('clearAll removes all cached queries and awaits completion', async () => {
+  test('clear is awaitable', async () => {
     await client.query({
       queryFn: () => Promise.resolve('value1'),
       queryKey: ['test1']
@@ -181,7 +181,7 @@ describe('QueryClient', () => {
       queryKey: ['test2']
     });
 
-    await client.clearAll();
+    await client.clear();
 
     let callCount1 = 0;
     let callCount2 = 0;
@@ -482,6 +482,64 @@ describe('QueryClient', () => {
     // Cache should now hold the new value immediately (even if previous entry was fresh)
     expect(await client.getQueryData(['refetch', 'upd'])).toBe('v2');
   });
+  test('query with retry succeeds after transient failure', async () => {
+    let callCount = 0;
+    const result = await client.query({
+      queryFn: () => {
+        callCount++;
+        if (callCount < 3) {
+          throw new Error(`fail ${callCount}`);
+        }
+        return Promise.resolve('success');
+      },
+      queryKey: ['retry', 'transient'],
+      retry: 3,
+      retryDelay: 10
+    });
+    expect(result.data).toBe('success');
+    expect(result.error).toBeUndefined();
+    expect(callCount).toBe(3);
+  });
+
+  test('query exhausts retries and returns error', async () => {
+    let callCount = 0;
+    const result = await client.query({
+      queryFn: () => {
+        callCount++;
+        throw new Error(`fail ${callCount}`);
+      },
+      queryKey: ['retry', 'exhaust'],
+      retry: 2,
+      retryDelay: 10
+    });
+    expect(result.data).toBeUndefined();
+    expect(result.error).toBeInstanceOf(Error);
+    expect(result.error?.message).toBe('fail 3'); // initial + 2 retries
+    expect(callCount).toBe(3);
+  });
+
+  test('custom retryDelay function is called with attempt number', async () => {
+    const attempts: number[] = [];
+    let callCount = 0;
+    const result = await client.query({
+      queryFn: () => {
+        callCount++;
+        if (callCount <= 3) {
+          throw new Error(`fail ${callCount}`);
+        }
+        return Promise.resolve('ok');
+      },
+      queryKey: ['retry', 'custom-delay'],
+      retry: 3,
+      retryDelay: (attempt: number) => {
+        attempts.push(attempt);
+        return 5; // short delay for test speed
+      }
+    });
+    expect(result.data).toBe('ok');
+    expect(attempts).toEqual([0, 1, 2]);
+  });
+
   test('refetchQueries supports concurrency option', async () => {
     const delay = 40; // ms per refetch
 
