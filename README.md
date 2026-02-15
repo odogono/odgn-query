@@ -35,7 +35,7 @@ const { data, error } = await client.query({
   ttl: 60000, // 1 minute
   backgroundRefresh: true,
   retry: 3, // retry up to 3 times on failure
-  retryDelay: 1000 // exponential backoff starting at 1s
+  retryDelay: attempt => 1000 * 2 ** attempt // exponential backoff starting at 1s
 });
 if (error) throw error;
 // use data
@@ -65,7 +65,7 @@ const updateUser = client.mutation({
   onSuccess: (data, variables) => {
     console.log('User updated:', data);
     // Manually invalidate related queries
-    client.invalidate(['user', userId]);
+    client.invalidate(['user', data.id]);
     client.invalidate(['users']);
   },
   onError: (error, variables) => {
