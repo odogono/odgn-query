@@ -1,7 +1,12 @@
 // cache_redis.ts
 import SuperJSON from 'superjson';
 
-import { isKeyPrefixMatch, normalizeKey, type AsyncOrSync, type QueryKey } from '.';
+import {
+  isKeyPrefixMatch,
+  normalizeKey,
+  type AsyncOrSync,
+  type QueryKey
+} from '.';
 import { ONE_MINUTE_IN_MS } from '../helpers/time';
 
 // Minimal interface alignment with QueryCache
@@ -123,7 +128,11 @@ export class RedisQueryCache {
           try {
             const newVal = await fn();
             const newEntry = { expiry: Date.now() + ttl, value: newVal };
-            await this.setWithTtl(this.k(norm), SuperJSON.stringify(newEntry), ttl);
+            await this.setWithTtl(
+              this.k(norm),
+              SuperJSON.stringify(newEntry),
+              ttl
+            );
             await this.redis.sadd(`${this.prefix}:index`, norm);
             return newVal;
           } finally {

@@ -168,7 +168,6 @@ export class QueryCache {
     }
   }
 
-
   findMatchingKeys(
     matcher: QueryKey | QueryKey[] | ((key: QueryKey) => boolean)
   ): QueryKey[] {
