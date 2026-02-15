@@ -1,6 +1,6 @@
 # ODGN query
 
-A minimal, barely passable, implemention of a caching framework not unlike [Tanstack Query](https://github.com/TanStack/query)
+A caching framework not unlike [Tanstack Query](https://github.com/TanStack/query)
 
 Runtime support: Works in browsers, Node, and Deno by default via the in-memory LRU adapter. Redis and SQLite adapters are optional and loaded lazily; they require Bun at runtime. You can also plug in your own adapter to use any store (e.g., Node Redis client, Deno KV).
 
@@ -9,9 +9,11 @@ Runtime support: Works in browsers, Node, and Deno by default via the in-memory 
 ### Basic Query
 
 ```typescript
-import { queryClient } from 'odgn-query';
+import { QueryClient } from 'odgn-query';
 
-const { data, error } = await queryClient.query({
+const client = new QueryClient();
+
+const { data, error } = await client.query({
   queryFn: () => fetch('/api/users').then(res => res.json()),
   queryKey: ['users']
 });
@@ -19,28 +21,39 @@ if (error) throw error;
 // use data
 ```
 
-Note: `query()` returns an object `{ data, error }`.
+Note: `query()` returns an object `{ data, error }`. There is no global singleton — always instantiate your own `QueryClient`.
 
 ### Query with Options
 
 ```typescript
-const { data, error } = await queryClient.query({
+const { data, error } = await client.query({
   queryFn: async () => {
     // Simulate API call
     return { id: 1, name: 'John' };
   },
   queryKey: ['user', 1],
   ttl: 60000, // 1 minute
-  backgroundRefresh: true
+  backgroundRefresh: true,
+  retry: 3, // retry up to 3 times on failure
+  retryDelay: 1000 // exponential backoff starting at 1s
 });
 if (error) throw error;
 // use data
 ```
 
+Retry can also be configured globally on the `QueryClient`:
+
+```typescript
+const client = new QueryClient({
+  retry: 2,
+  retryDelay: attempt => 500 * 2 ** attempt // 500ms, 1s, 2s, ...
+});
+```
+
 ### Mutations
 
 ```typescript
-const updateUser = queryClient.mutation({
+const updateUser = client.mutation({
   key: 'updateUser',
   mutationFn: async (userId: number, updates: any) => {
     const response = await fetch(`/api/users/${userId}`, {
@@ -52,8 +65,8 @@ const updateUser = queryClient.mutation({
   onSuccess: (data, variables) => {
     console.log('User updated:', data);
     // Manually invalidate related queries
-    queryClient.invalidate(['user', userId]);
-    queryClient.invalidate(['users']);
+    client.invalidate(['user', userId]);
+    client.invalidate(['users']);
   },
   onError: (error, variables) => {
     console.error('Update failed:', error);
@@ -63,10 +76,11 @@ const updateUser = queryClient.mutation({
 // Use the mutation - returns an object with state and methods
 const { mutate, mutateAsync, isSuccess, isError } = updateUser;
 
-// Execute the mutation
-const updatedUser = await mutate(1, { name: 'Jane' });
-// or
-const updatedUser2 = await mutateAsync(1, { name: 'John' });
+// Fire-and-forget (errors handled by onError callback)
+mutate(1, { name: 'Jane' });
+
+// Or await the result and handle errors yourself
+const updatedUser = await mutateAsync(1, { name: 'John' });
 
 // Check mutation state
 if (isSuccess) {
@@ -92,11 +106,11 @@ Unlike TanStack Query, this library requires manual invalidation. Use `onSuccess
 ```typescript
 onSuccess: (data, variables) => {
   // Invalidate specific queries
-  queryClient.invalidate(['user', data.id]);
-  queryClient.invalidate(['users']);
+  client.invalidate(['user', data.id]);
+  client.invalidate(['users']);
 
   // Or invalidate by prefix
-  queryClient.invalidateQueries(['user']);
+  client.invalidateQueries(['user']);
 };
 ```
 
@@ -104,15 +118,15 @@ onSuccess: (data, variables) => {
 
 The `mutation()` method returns an object with:
 
-- `mutate`: Execute the mutation (returns Promise<TResult>)
-- `mutateAsync`: Alias for `mutate`
+- `mutate`: Fire-and-forget execution (returns `void`; errors are swallowed and routed to `onError`)
+- `mutateAsync`: Execute and await the result (returns `Promise<TResult>`; throws on error)
 - `isSuccess`: Boolean indicating if last mutation succeeded
 - `isError`: Boolean indicating if last mutation failed
 
 ### Event Listening
 
 ```typescript
-queryClient.on('event', event => {
+client.on('event', event => {
   console.log(`Event: ${event.type}`, event.key);
 });
 ```
@@ -120,17 +134,14 @@ queryClient.on('event', event => {
 ### Cache Management
 
 ```typescript
-// Invalidate a single query
-queryClient.invalidate(['users', 1]);
+// Invalidate a single query (returns a promise)
+await client.invalidate(['users', 1]);
 
-// Invalidate by prefix (branch)
-queryClient.invalidateQueries(['users']);
+// Invalidate by prefix (returns a promise)
+await client.invalidateQueries(['users']);
 
-// Clear the entire cache (fire-and-forget)
-queryClient.clear();
-
-// Clear the entire cache and await completion
-await queryClient.clearAll();
+// Clear the entire cache (returns a promise)
+await client.clear();
 ```
 
 ### Refetching
@@ -139,19 +150,19 @@ Refetch and refresh cached queries by key, prefix, or predicate. Refetch always 
 
 ```ts
 // Exact keys
-const results = await queryClient.refetchQueries([['users'], ['user', 1]]);
+const results = await client.refetchQueries([['users'], ['user', 1]]);
 
 // Prefix
-const branch = await queryClient.refetchQueries(['users']);
+const branch = await client.refetchQueries(['users']);
 
 // Predicate
-const subset = await queryClient.refetchQueries(key => key[0] === 'users');
+const subset = await client.refetchQueries(key => key[0] === 'users');
 
 // Error mode: throw on first error
-await queryClient.refetchQueries([['user', 2]], { throwOnError: true });
+await client.refetchQueries([['user', 2]], { throwOnError: true });
 
 // Concurrency control (defaults to all-at-once when not throwing)
-await queryClient.refetchQueries(['users'], { concurrency: 4 });
+await client.refetchQueries(['users'], { concurrency: 4 });
 ```
 
 Returns an array of `{ key, data?, error? }`. When `throwOnError: true`, refetch short-circuits on the first error.
@@ -169,33 +180,33 @@ Notes:
 
 ```ts
 // Read cached data (may be stale)
-const users = await queryClient.getQueryData<User[]>(['users']);
+const users = await client.getQueryData<User[]>(['users']);
 
 // Seed/optimistically update cached data
-await queryClient.setQueryData(['users', 1], { id: 1, name: 'Alice' }, 60000);
+await client.setQueryData(['users', 1], { id: 1, name: 'Alice' }, 60000);
 ```
 
 ### Stats and GC
 
 ```ts
 // Reset counters
-queryClient.resetStats();
+client.resetStats();
 
 // Run some queries
-await queryClient.query({
+await client.query({
   queryFn: () => fetch('/api').then(r => r.json()),
   queryKey: ['api']
 });
-await queryClient.query({
+await client.query({
   queryFn: () => fetch('/api').then(r => r.json()),
   queryKey: ['api']
 });
 
 // Inspect counters: { hits, misses, stale, fetches, errors }
-console.log(queryClient.stats());
+console.log(client.stats());
 
 // Garbage-collect expired entries (removes only expired ones)
-const removed = await queryClient.gc();
+const removed = await client.gc();
 console.log(`GC removed ${removed} entries`);
 ```
 
@@ -303,11 +314,6 @@ await client.refetchQueries(['users']);
 await client.refetchQueries(key => key[0] === 'users');
 ```
 
-To install dependencies:
-
-````bash
-bun install
-
 ### Custom Adapters (Node/Deno friendly)
 
 You can supply your own cache adapter that implements the `CacheAdapter` contract, avoiding any Bun-specific APIs:
@@ -333,25 +339,42 @@ const myAdapter: CacheAdapter = {
 };
 
 const client = new QueryClient({ adapter: myAdapter });
-````
+```
 
-````
+### Subpath Exports
 
-To run:
+The Redis and SQLite adapters are also available as direct subpath imports:
+
+```ts
+import { RedisQueryCache } from 'odgn-query/redis';
+import { SqliteQueryCache } from 'odgn-query/sqlite';
+```
+
+## Install
 
 ```bash
-bun run index.ts
-````
-
-This project was created using `bun init` in bun v1.2.22. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.
+bun install
+```
 
 ## API
 
 - Types
   - `QueryKey`: readonly array of primitives, e.g. `['users', 1]`.
+  - `QueryClientOptions`: constructor options including `cache`, `retry`, `retryDelay`, `defaultTtl`, etc.
   - `RefetchOptions`: `{ concurrency?: number; throwOnError?: boolean }`.
   - `RefetchResult`: `{ key: QueryKey; data?: unknown; error?: Error }`.
   - `CacheAdapter`: pluggable cache interface; `findMatchingKeys` may be async.
+
+- Query
+  - Signature: `query<T>(opts) => Promise<{ data: T | undefined; error: Error | undefined }>`
+  - Per-query options: `queryKey`, `queryFn`, `ttl`, `backgroundRefresh`, `retry`, `retryDelay`.
+
+- Mutation
+  - `mutate(...args)`: fire-and-forget (returns `void`).
+  - `mutateAsync(...args)`: returns `Promise<TResult>`, throws on error.
+
+- Cache management
+  - `invalidate(key)`, `invalidateQueries(prefix)`, `clear()` — all return `Promise<void>`.
 
 - Refetch
   - Signature: `refetchQueries(matcher, options?) => Promise<RefetchResult[]>`
@@ -363,16 +386,14 @@ Example with types:
 
 ```ts
 import {
-  queryClient,
+  QueryClient,
   type RefetchOptions,
   type RefetchResult
 } from 'odgn-query';
 
+const client = new QueryClient();
 const opts: RefetchOptions = { concurrency: 4 };
-const results: RefetchResult[] = await queryClient.refetchQueries(
-  ['users'],
-  opts
-);
+const results: RefetchResult[] = await client.refetchQueries(['users'], opts);
 ```
 
 ## License
